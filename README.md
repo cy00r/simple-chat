@@ -1,71 +1,115 @@
 # Simple Chat
 
-## Summary
+A minimal async TCP chat server and CLI client written in Rust with Tokio.
 
-You have been tasked with writing a simple asynchronous chat server and CLI
-client.
+## Demo
 
-Since this is a simple chat server there is only a single room. Users may
-freely join or leave this room. They may also send messages to the room, which
-will be sent to all connected users minus the sender.
+> https://github.com/user-attachments/assets/269ce9b6-45f4-4f91-a5ab-45433cd9feeb
 
-Even though the server is simple, it has high throughput. Because of this, all
-code should be non-blocking for maximum concurrency.
+## Architecture
 
-The following is a rough specification of the server and client.
+```
+┌──────────┐   JSON/TCP   ┌────────────────────────────────────────┐
+│  client  │ ──────────► │  server                                 │
+│          │ ◄──────────  │  • broadcast channel (256 capacity)    │
+└──────────┘              │  • one task per connection (non-block) │
+                          │  • HashMap<username, addr> for users   │
+                          └────────────────────────────────────────┘
+```
 
-## Server
+### Protocol
 
-* The servers job is to manage users.
-* It should be able to receive a message from a user and process it.
-* The user may wish to join, leave or send a message through the chat server.
-* Any other user who is currently connected should get the message sent to
-them.
-* The user who sent the message should not get the message.
-* When a user sends a leave message, or disconnects their client, the server
-should no longer send messages to them, and do any internal bookkeeping to 
-clean up.
-* Username's should be unique.
-* The server should be able to support many users without a large delay
-* The server should be able to support many users with a small memory footprint
+All messages are newline-delimited JSON.
 
+**Client → Server**
 
-## Client
+| Message | Payload | Description |
+|---------|---------|-------------|
+| `Join`  | `{ username }` | Must be first message; rejected if name taken |
+| `Send`  | `{ text }` | Broadcast text to all other users |
+| `Leave` | — | Graceful disconnect |
 
-* The client is an async CLI program.
-* It is responsible for sending messages to the server and displaying any
-messages from the server.
-* The client should accept environment variables or command line arguments
-indicating the host and port where the server is listening. It should also
-accept a username that will be used as an identifier on the server.
-* The client should automatically connect to the chat server upon 
-initialization using the specified host and port.
-* The client should display an interactive command prompt. The prompt should 
-be able to handle the following inputs:
-    * `send <MSG>`  where `<MSG>`  is the message that should be sent to the 
-    server
-    * `leave` this will disconnect the client from the server and exit the CLI.
+**Server → Client**
 
+| Message | Payload | Description |
+|---------|---------|-------------|
+| `Chat`  | `{ from, text }` | A message from another user |
+| `Info`  | `{ text }` | Join/leave announcements |
+| `Error` | `{ text }` | e.g. duplicate username |
 
-## Additional Requirements
+## Running
 
-* Your source should contain both unit and integration tests where necessary.
-* All code must be formatted using the standard formatting tool.
-* Code must compile without clippy errors.
+### Prerequisites
 
-## Submission
+```bash
+rustup toolchain install stable
+```
 
-Please fork this repository to your own GitHub account and submit a pull
-request to your own repository. Your pull request should include a
-video of a working demo at the top along with any other key information
-that should be highlighted. A link to the pull request can be submitted when
-it is ready for review.
+### Install the pre-commit hook (optional but recommended)
 
-## Bonus
+```bash
+git config core.hooksPath .githooks
+chmod +x .githooks/pre-commit
+```
 
-* Include a pre-commit hook that will ensure that all code is formatted, compiles
-without error, and is free of clippy errors.
-* Create a GitHub Action that will launch your chat server and attempt to 
-send a message to the server from the client. Make sure that niether the server
-or client exit with a failure. This action should be run anytime new code
-is pushed to a branch or landed on the main branch.
+### Start the server
+
+```bash
+# defaults: HOST=127.0.0.1 PORT=8080
+cargo run -p server
+
+# or with custom host/port
+HOST=0.0.0.0 PORT=9000 cargo run -p server
+```
+
+### Start a client
+
+```bash
+# Pass host, port, username as positional args …
+cargo run -p client -- 127.0.0.1 8080 alice
+
+# … or via env vars
+HOST=127.0.0.1 PORT=8080 USERNAME=alice cargo run -p client
+```
+
+### Client commands
+
+```
+> send Hello everyone!    # broadcast a message
+> leave                   # disconnect and exit
+```
+
+### Multi-user example (three terminals)
+
+```
+# Terminal 1
+cargo run -p server
+
+# Terminal 2
+cargo run -p client -- 127.0.0.1 8080 alice
+
+# Terminal 3
+cargo run -p client -- 127.0.0.1 8080 bob
+```
+
+## Testing
+
+```bash
+cargo test --all
+```
+
+## CI / CD
+
+The GitHub Actions workflow (`.github/workflows/ci.yml`) runs on every push and PR:
+
+1. **Format check** – `cargo fmt --all -- --check`
+2. **Clippy** – zero warnings allowed
+3. **Unit + integration tests** – `cargo test --all`
+4. **E2E smoke test** – starts the server, connects with the client, sends a message, then leaves
+
+## Design decisions
+
+- **`broadcast::channel`** – single channel for all users; each connection task subscribes. Old messages are dropped for lagging readers rather than blocking the sender.
+- **`OwnedWriteHalf` behind `Arc<Mutex<…>>`** – lets the forward task and the main connection task share the TCP writer safely without an extra channel.
+- **Non-blocking everywhere** – every I/O call is async; no `std::thread::sleep` or blocking reads.
+- **Small memory footprint** – one `broadcast::Sender`, one `HashMap` entry per user, one task pair (read + forward) per connection.
